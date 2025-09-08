@@ -120,7 +120,11 @@ else:
 if index_mode:
     y_enc = alt.Y(f"{plot_field}:Q", title=y_title)
 else:
-    y_enc = alt.Y(f"{plot_field}:Q", title=y_title, scale=alt.Scale(type="log"))
+    y_enc = alt.Y(
+        f"{plot_field}:Q",
+        title=y_title,
+        scale=alt.Scale(type="log", domain=[900, 3000])  # <<< domínio fixado
+    )
 
 base = alt.Chart(df).mark_line(interpolate="step-after").encode(
     x=alt.X("Date:T", title="Date"),
@@ -166,4 +170,4 @@ st.caption("""Notes:
 - The ClubElo API returns intervals [From, To] where Elo is constant; the chart uses equivalent steps.
 - Enable “Δ Elo” to better visualize changes (each club is rebased to zero at the first date in the selected window).
 - Use the mouse wheel or drag to zoom/pan the chart.
-- When Δ Elo is OFF, the Y axis uses a logarithmic scale (zeros are not plotted).""")
+- When Δ Elo is OFF, the Y axis uses a logarithmic scale fixed between 900 and 3000.""")
