@@ -58,6 +58,24 @@ index_mode = st.sidebar.checkbox("Show change from first date (Δ Elo)", value=T
 
 st.sidebar.caption("Tip: use slugs as they appear in ClubElo URLs, e.g., Valerenga, Rosenborg, Molde, Brann.")
 
+# --- Log scale domain controls (only apply when NOT in Δ Elo) ---
+st.sidebar.subheader("Y-axis (log) domain")
+use_custom_domain = st.sidebar.checkbox(
+    "Use custom log scale (only when Δ Elo is OFF)",
+    value=True
+)
+domain_slider = st.sidebar.slider(
+    "Log domain [min, max]",
+    min_value=500,
+    max_value=4000,
+    value=(900, 3000),
+    step=50,
+    help="Adjust to zoom vertical scale on log axis (requires Δ Elo OFF).",
+    disabled=index_mode  # disabled when Δ is ON
+)
+if index_mode:
+    st.sidebar.info("Δ Elo is ON → linear scale. Turn it OFF to use the log scale & domain slider.")
+
 # --- Load data ---
 all_series = []
 error_msgs = []
@@ -104,7 +122,7 @@ if rolling and rolling > 0:
 else:
     value_field = "Elo"
 
-# Index/Delta mode to improve scale visibility
+# Index/Delta mode
 if index_mode:
     df = df.sort_values(["Club", "Date"])
     first_vals = df.groupby("Club")[value_field].transform("first")
@@ -116,15 +134,20 @@ else:
     y_title = "Elo"
 
 # --- Chart ---
-# Log scale ONLY when not using Δ Elo
+# Y encoding:
 if index_mode:
+    # Linear scale in Δ Elo (handles negatives/zero)
     y_enc = alt.Y(f"{plot_field}:Q", title=y_title)
 else:
-    y_enc = alt.Y(
-        f"{plot_field}:Q",
-        title=y_title,
-        scale=alt.Scale(type="log", domain=[900, 3000])  # <<< domínio fixado
-    )
+    # Log scale when NOT Δ Elo; optionally apply custom domain from slider
+    log_scale = alt.Scale(type="log")
+    if use_custom_domain and domain_slider:
+        dom_min, dom_max = domain_slider
+        # safety: ensure > 0 and min < max
+        dom_min = max(1, dom_min)
+        dom_max = max(dom_min + 1, dom_max)
+        log_scale = alt.Scale(type="log", domain=[dom_min, dom_max])
+    y_enc = alt.Y(f"{plot_field}:Q", title=y_title, scale=log_scale)
 
 base = alt.Chart(df).mark_line(interpolate="step-after").encode(
     x=alt.X("Date:T", title="Date"),
@@ -170,4 +193,4 @@ st.caption("""Notes:
 - The ClubElo API returns intervals [From, To] where Elo is constant; the chart uses equivalent steps.
 - Enable “Δ Elo” to better visualize changes (each club is rebased to zero at the first date in the selected window).
 - Use the mouse wheel or drag to zoom/pan the chart.
-- When Δ Elo is OFF, the Y axis uses a logarithmic scale fixed between 900 and 3000.""")
+- Log scale & domain slider apply only when Δ Elo is OFF.""")
