@@ -122,14 +122,14 @@ def _name_matches(candidate: str, target: str) -> bool:
             return True
     return False
 
+
 def _parse_year_snapshot(text_plain: str, team_name: str):
     """
-    Parse a yearly snapshot (already HTML-stripped) and extract the rating
-    for the given team. Accepts variants like:
-      '1. Spain. 2178' or '1. Spain 2178'
+    Parse a yearly snapshot (already HTML-stripped) and extract the rating for the given team.
+    Accepts variants like: '1. Spain. 2178' or '1. Spain 2178'.
     """
     # Primary pattern: rank '.' name [optional '.'] rating
-    pat = re.compile(r"\b\d+\.\s*([A-Za-zÀ-ÿ'’\-\.\(\) &]+?)\s*\.?\s*([0-9]{3,4})\b")
+    pat = re.compile(r"\b\d+\.\s*([A-Za-zÀ-ÿ'’\-\.() &]+?)\s*\.?\s*([0-9]{3,4})\b")
 
     # Strict search first (exact team name via _name_matches)
     for m in pat.finditer(text_plain):
@@ -141,8 +141,7 @@ def _parse_year_snapshot(text_plain: str, team_name: str):
             except Exception:
                 pass
 
-    # Fallback: team name anywhere, followed by a trailing 3–4 digit rating
-    # e.g., "... Norway ... 1850"
+    # Fallback: team name anywhere, followed by a trailing 3–4 digit rating within ~40 chars
     tail = re.compile(rf"{re.escape(team_name)}[^0-9]{{0,40}}([0-9]{{3,4}})\b", re.IGNORECASE)
     m2 = tail.search(text_plain)
     if m2:
@@ -183,6 +182,7 @@ def fetch_national_history_yearly(team_name: str,
     df = pd.DataFrame(records).sort_values("Date").reset_index(drop=True)
     return _stepify(df, "Date", "Elo", "Entity", team_name)
 
+
 def _try_graph_endpoints(team_name: str) -> pd.DataFrame | None:
     """
     Try possible chart endpoints (if any are publicly available).
@@ -207,4 +207,210 @@ def _try_graph_endpoints(team_name: str) -> pd.DataFrame | None:
                             v = float(parts[1])
                             rows.append({"Date": d, "Elo": v})
                         except Exception:
-                            pass\n            if rows:\n                df = pd.DataFrame(rows).sort_values(\"Date\").reset_index(drop=True)\n                return _stepify(df, \"Date\", \"Elo\", \"Entity\", team_name)\n        except Exception:\n            continue\n    return None\n\n@st.cache_data(show_spinner=False)\ndef fetch_selection_history(team_name: str,\n                            prefer_graph_endpoint: bool = True,\n                            year_start: int = YEARS_MIN,\n                            year_end: int = YEARS_MAX) -> pd.DataFrame:\n    \"\"\"\n    Retrieve Elo series for a national team.\n    1) Try chart endpoints (if available).\n    2) Fallback: yearly snapshots (Dec 31) with step curve.\n    \"\"\"\n    if prefer_graph_endpoint:\n        df = _try_graph_endpoints(team_name)\n        if df is not None and not df.empty:\n            return df\n    return fetch_national_history_yearly(team_name, year_start, year_end)\n\n# ---------------------------\n# Sidebar (UI)\n# ---------------------------\nst.sidebar.header(\"Controls\")\n\ndata_source = st.sidebar.selectbox(\n    \"Data source\",\n    options=[\"Clubs (ClubElo API)\", \"National Teams (eloratings.net)\"],\n    index=0\n)\n\nif data_source.startswith(\"Clubs\"):\n    st.sidebar.caption(\"Use the slug as it appears in ClubElo URLs (e.g., Valerenga, Rosenborg).\")\n    default_main = \"Valerenga\"\n    main_label = \"Main club (ClubElo slug)\"\n    compare_label = \"Compare (up to 3 slugs, comma-separated)\"\nelse:\n    st.sidebar.caption(\"Type the national team name exactly as on eloratings (e.g., Norway, Brazil, Spain).\")\n    default_main = \"Norway\"\n    main_label = \"Main team (name)\"\n    compare_label = \"Compare (up to 3 teams, comma-separated)\"\n\nentity_main = st.sidebar.text_input(main_label, value=default_main)\ncompare_raw = st.sidebar.text_input(compare_label, value=\"\")\n\ndate_start = st.sidebar.date_input(\"Start date\", value=None)\ndate_end = st.sidebar.date_input(\"End date\", value=None)\n\nmoving_average_entries = st.sidebar.number_input(\n    \"Moving average (entries)\", min_value=0, max_value=50, value=0,\n    help=\"0 = no smoothing. Applied per entity (club/team).\"\n)\n\nshow_delta = st.sidebar.checkbox(\"Show change since first date (Δ Elo)\", value=True)\n\nst.sidebar.subheader(\"Y-axis (log) — only when Δ is OFF\")\nuse_custom_log_domain = st.sidebar.checkbox(\"Use custom log domain\", value=True)\nlog_domain = st.sidebar.slider(\n    \"Log domain [min, max]\",\n    min_value=500,\n    max_value=4000,\n    value=(900, 3000),\n    step=50,\n    help=\"Adjust to zoom vertically on log scale (requires Δ OFF).\",\n    disabled=show_delta\n)\n\n# ---------------------------\n# Load data\n# ---------------------------\nall_series = []\nerrors = []\n\ndef _load_one(entity: str) -> pd.DataFrame | None:\n    try:\n        if data_source.startswith(\"Clubs\"):\n            return fetch_club_history(entity.strip())\n        else:\n            return fetch_selection_history(entity.strip(), prefer_graph_endpoint=True)\n    except Exception as exc:\n        errors.append(f\"Failed to fetch **{entity}**: {exc}\")\n        return None\n\nmain_df = _load_one(entity_main)\nif main_df is not None and not main_df.empty:\n    all_series.append(main_df)\n\ncompare_entities = [c.strip() for c in compare_raw.split(\",\") if c.strip()]\ncompare_entities = compare_entities[:3]\nfor ent in compare_entities:\n    cdf = _load_one(ent)\n    if cdf is not None and not cdf.empty:\n        all_series.append(cdf)\n\nif errors:\n    st.warning(\" • \".join(errors))\n\nif not all_series:\n    st.stop()\n\ndf = pd.concat(all_series, ignore_index=True)\n\n# Date filters\nif date_start:\n    df = df[df[\"Date\"] >= pd.to_datetime(date_start)]\nif date_end:\n    df = df[df[\"Date\"] <= pd.to_datetime(date_end) + pd.to_timedelta(1, unit=\"D\")]\n\n# Smoothing\nif moving_average_entries and moving_average_entries > 0:\n    df = df.sort_values([\"Entity\", \"Date\"])\n    df[\"Elo_smoothed\"] = df.groupby(\"Entity\")[\"Elo\"].transform(\n        lambda s: s.rolling(int(moving_average_entries), min_periods=1).mean()\n    )\n    value_field = \"Elo_smoothed\"\nelse:\n    value_field = \"Elo\"\n\n# Delta / index mode\nif show_delta:\n    df = df.sort_values([\"Entity\", \"Date\"])\n    first_vals = df.groupby(\"Entity\")[value_field].transform(\"first\")\n    df[\"Delta\"] = df[value_field] - first_vals\n    plot_field = \"Delta\"\n    y_title = \"Δ Elo (vs first date)\"\nelse:\n    plot_field = value_field\n    y_title = \"Elo\"\n\n# ---------------------------\n# Chart\n# ---------------------------\nif show_delta:\n    y_enc = alt.Y(f\"{plot_field}:Q\", title=y_title)\nelse:\n    log_scale = alt.Scale(type=\"log\")\n    if use_custom_log_domain and log_domain:\n        dom_min, dom_max = log_domain\n        dom_min = max(1, dom_min)\n        dom_max = max(dom_min + 1, dom_max)\n        log_scale = alt.Scale(type=\"log\", domain=[dom_min, dom_max])\n    y_enc = alt.Y(f\"{plot_field}:Q\", title=y_title, scale=log_scale)\n\nchart = (\n    alt.Chart(df)\n    .mark_line(interpolate=\"step-after\")\n    .encode(\n        x=alt.X(\"Date:T\", title=\"Date\"),\n        y=y_enc,\n        color=alt.Color(\"Entity:N\", title=\"Club/Team\"),\n        tooltip=[\n            alt.Tooltip(\"Entity:N\", title=\"Entity\"),\n            alt.Tooltip(\"Date:T\", title=\"Date\"),\n            alt.Tooltip(\"Elo:Q\", title=\"Elo (raw)\", format=\".0f\"),\n            alt.Tooltip(f\"{value_field}:Q\", title=\"Elo (trace base)\", format=\".0f\"),\n            alt.Tooltip(f\"{plot_field}:Q\", title=\"Displayed value\", format=\".0f\"),\n        ],\n    )\n    .properties(height=460)\n)\n\nst.altair_chart(chart.interactive(), use_container_width=True)\n\n# ---------------------------\n# Quick metrics (main entity)\n# ---------------------------\nst.subheader(\"Summary (main entity)\")\nmain_mask = df[\"Entity\"] == entity_main\nm = df.loc[main_mask].copy()\nif not m.empty:\n    m = m.sort_values(\"Date\")\n    current = float(m.iloc[-1][value_field])\n    start_val = float(m.iloc[0][value_field])\n    delta_val = current - start_val\n    col1, col2, col3 = st.columns(3)\n    col1.metric(\"Latest Elo (in range)\", f\"{current:.0f}\")\n    col2.metric(\"First Elo (in range)\", f\"{start_val:.0f}\")\n    col3.metric(\"Change\", f\"{delta_val:+.0f}\")\nelse:\n    st.info(\"No data for the selected period.\")\n\n# ---------------------------\n# Export\n# ---------------------------\nst.subheader(\"Export\")\nexport_cols = [\"Date\", \"Entity\", \"Elo\"]\nif \"Elo_smoothed\" in df.columns:\n    export_cols.append(\"Elo_smoothed\")\nif \"Delta\" in df.columns:\n    export_cols.append(\"Delta\")\n\ncsv_bytes = df[export_cols].sort_values([\"Entity\", \"Date\"]).to_csv(index=False).encode(\"utf-8\")\nst.download_button(\"Download CSV (current view)\", data=csv_bytes, file_name=\"elo_series.csv\", mime=\"text/csv\")\n\nst.caption(\n    \"\"\"\nNotes:\n- Clubs: data from http://api.clubelo.com ([From, To] intervals = steps).\n- National teams: tries chart endpoints first; otherwise, uses yearly snapshots (Dec 31) from eloratings.net and builds a step curve.\n- Turn on “Δ Elo” to view changes (each entity is rebased to zero at the first date in the selected range).\n- Log scale & custom domain only apply when Δ is OFF.\n\"\"\"\n)\n
+                            pass
+            if rows:
+                df = pd.DataFrame(rows).sort_values("Date").reset_index(drop=True)
+                return _stepify(df, "Date", "Elo", "Entity", team_name)
+        except Exception:
+            continue
+    return None
+
+@st.cache_data(show_spinner=False)
+def fetch_selection_history(team_name: str,
+                            prefer_graph_endpoint: bool = True,
+                            year_start: int = YEARS_MIN,
+                            year_end: int = YEARS_MAX) -> pd.DataFrame:
+    """
+    Retrieve Elo series for a national team.
+    1) Try chart endpoints (if available).
+    2) Fallback: yearly snapshots (Dec 31) with step curve.
+    """
+    if prefer_graph_endpoint:
+        df = _try_graph_endpoints(team_name)
+        if df is not None and not df.empty:
+            return df
+    return fetch_national_history_yearly(team_name, year_start, year_end)
+
+# ---------------------------
+# Sidebar (UI)
+# ---------------------------
+st.sidebar.header("Controls")
+
+data_source = st.sidebar.selectbox(
+    "Data source",
+    options=["Clubs (ClubElo API)", "National Teams (eloratings.net)"],
+    index=0
+)
+
+if data_source.startswith("Clubs"):
+    st.sidebar.caption("Use the slug as it appears in ClubElo URLs (e.g., Valerenga, Rosenborg).")
+    default_main = "Valerenga"
+    main_label = "Main club (ClubElo slug)"
+    compare_label = "Compare (up to 3 slugs, comma-separated)"
+else:
+    st.sidebar.caption("Type the national team name exactly as on eloratings (e.g., Norway, Brazil, Spain).")
+    default_main = "Norway"
+    main_label = "Main team (name)"
+    compare_label = "Compare (up to 3 teams, comma-separated)"
+
+entity_main = st.sidebar.text_input(main_label, value=default_main)
+compare_raw = st.sidebar.text_input(compare_label, value="")
+
+date_start = st.sidebar.date_input("Start date", value=None)
+date_end = st.sidebar.date_input("End date", value=None)
+
+moving_average_entries = st.sidebar.number_input(
+    "Moving average (entries)", min_value=0, max_value=50, value=0,
+    help="0 = no smoothing. Applied per entity (club/team)."
+)
+
+show_delta = st.sidebar.checkbox("Show change since first date (Δ Elo)", value=True)
+
+st.sidebar.subheader("Y-axis (log) — only when Δ is OFF")
+use_custom_log_domain = st.sidebar.checkbox("Use custom log domain", value=True)
+log_domain = st.sidebar.slider(
+    "Log domain [min, max]",
+    min_value=500,
+    max_value=4000,
+    value=(900, 3000),
+    step=50,
+    help="Adjust to zoom vertically on log scale (requires Δ OFF).",
+    disabled=show_delta
+)
+
+# ---------------------------
+# Load data
+# ---------------------------
+all_series = []
+errors = []
+
+def _load_one(entity: str) -> pd.DataFrame | None:
+    try:
+        if data_source.startswith("Clubs"):
+            return fetch_club_history(entity.strip())
+        else:
+            return fetch_selection_history(entity.strip(), prefer_graph_endpoint=True)
+    except Exception as exc:
+        errors.append(f"Failed to fetch **{entity}**: {exc}")
+        return None
+
+main_df = _load_one(entity_main)
+if main_df is not None and not main_df.empty:
+    all_series.append(main_df)
+
+compare_entities = [c.strip() for c in compare_raw.split(",") if c.strip()]
+compare_entities = compare_entities[:3]
+for ent in compare_entities:
+    cdf = _load_one(ent)
+    if cdf is not None and not cdf.empty:
+        all_series.append(cdf)
+
+if errors:
+    st.warning(" • ".join(errors))
+
+if not all_series:
+    st.stop()
+
+df = pd.concat(all_series, ignore_index=True)
+
+# Date filters
+if date_start:
+    df = df[df["Date"] >= pd.to_datetime(date_start)]
+if date_end:
+    df = df[df["Date"] <= pd.to_datetime(date_end) + pd.to_timedelta(1, unit="D")]
+
+# Smoothing
+if moving_average_entries and moving_average_entries > 0:
+    df = df.sort_values(["Entity", "Date"])
+    df["Elo_smoothed"] = df.groupby("Entity")["Elo"].transform(
+        lambda s: s.rolling(int(moving_average_entries), min_periods=1).mean()
+    )
+    value_field = "Elo_smoothed"
+else:
+    value_field = "Elo"
+
+# Delta / index mode
+if show_delta:
+    df = df.sort_values(["Entity", "Date"])
+    first_vals = df.groupby("Entity")[value_field].transform("first")
+    df["Delta"] = df[value_field] - first_vals
+    plot_field = "Delta"
+    y_title = "Δ Elo (vs first date)"
+else:
+    plot_field = value_field
+    y_title = "Elo"
+
+# ---------------------------
+# Chart
+# ---------------------------
+if show_delta:
+    y_enc = alt.Y(f"{plot_field}:Q", title=y_title)
+else:
+    log_scale = alt.Scale(type="log")
+    if use_custom_log_domain and log_domain:
+        dom_min, dom_max = log_domain
+        dom_min = max(1, dom_min)
+        dom_max = max(dom_min + 1, dom_max)
+        log_scale = alt.Scale(type="log", domain=[dom_min, dom_max])
+    y_enc = alt.Y(f"{plot_field}:Q", title=y_title, scale=log_scale)
+
+chart = (
+    alt.Chart(df)
+    .mark_line(interpolate="step-after")
+    .encode(
+        x=alt.X("Date:T", title="Date"),
+        y=y_enc,
+        color=alt.Color("Entity:N", title="Club/Team"),
+        tooltip=[
+            alt.Tooltip("Entity:N", title="Entity"),
+            alt.Tooltip("Date:T", title="Date"),
+            alt.Tooltip("Elo:Q", title="Elo (raw)", format=".0f"),
+            alt.Tooltip(f"{value_field}:Q", title="Elo (trace base)", format=".0f"),
+            alt.Tooltip(f"{plot_field}:Q", title="Displayed value", format=".0f"),
+        ],
+    )
+    .properties(height=460)
+)
+
+st.altair_chart(chart.interactive(), use_container_width=True)
+
+# ---------------------------
+# Quick metrics (main entity)
+# ---------------------------
+st.subheader("Summary (main entity)")
+main_mask = df["Entity"] == entity_main
+m = df.loc[main_mask].copy()
+if not m.empty:
+    m = m.sort_values("Date")
+    current = float(m.iloc[-1][value_field])
+    start_val = float(m.iloc[0][value_field])
+    delta_val = current - start_val
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Latest Elo (in range)", f"{current:.0f}")
+    col2.metric("First Elo (in range)", f"{start_val:.0f}")
+    col3.metric("Change", f"{delta_val:+.0f}")
+else:
+    st.info("No data for the selected period.")
+
+# ---------------------------
+# Export
+# ---------------------------
+st.subheader("Export")
+export_cols = ["Date", "Entity", "Elo"]
+if "Elo_smoothed" in df.columns:
+    export_cols.append("Elo_smoothed")
+if "Delta" in df.columns:
+    export_cols.append("Delta")
+
+csv_bytes = df[export_cols].sort_values(["Entity", "Date"]).to_csv(index=False).encode("utf-8")
+st.download_button("Download CSV (current view)", data=csv_bytes, file_name="elo_series.csv", mime="text/csv")
+
+st.caption(
+    """
+Notes:
+- Clubs: data from http://api.clubelo.com ([From, To] intervals = steps).
+- National teams: tries chart endpoints first; otherwise, uses yearly snapshots (Dec 31) from eloratings.net and builds a step curve.
+- Turn on “Δ Elo” to view changes (each entity is rebased to zero at the first date in the selected range).
+- Log scale & custom domain only apply when Δ is OFF.
+"""
+)
